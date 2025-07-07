@@ -12,7 +12,7 @@ This Python script is designed to crawl the Illinois General Assembly (ILGA) web
 * `build_statutes_text_table:` Builds a DataFrame of statute texts by applying parse_statute_page to all identified statute URLs.
 
 ## Output Files
-The script generates the following files in the specified directory (/mnt/c/Users/nicholasmarchio/OneDrive - Cook County Government/Desktop/projects/statute-xwalk/ in the example):
+The script generates the following files in the specified directory (make sure to change directory path hardcoded in file):
 * ilcs-links.parquet and ilcs-links.csv: Contains the comprehensive index of all discovered ILCS chapter, act, and section URLs.
 * ilcs-act-text.parquet and ilcs-act-text.csv: Contains extracted text and metadata for each ILCS Act.
 * ilcs-statutes-text.parquet and ilcs-statutes-text.csv: Contains extracted text and metadata for each ILCS Statute (from the specified subset).
