@@ -10,6 +10,8 @@ import pandas as pd
 from time import sleep
 from urllib.parse import urlparse, parse_qs
 from tqdm import tqdm
+from typing import Tuple, Optional, Callable
+import logging
 
 pd.set_option('display.max_rows', 500)
 pd.set_option('display.max_columns', 500)
@@ -17,13 +19,12 @@ pd.set_option('display.width', 1000)
 pd.set_option('display.max_colwidth', 200)
 
 # %%
-def _request_util(full_url, base_url='https://ilga.gov/', timeout=(10, 30), max_retries=5):
+def _request_util(url: str, timeout: Tuple[int, int]=(10, 30), max_retries: int=5):
     """
-    Make HTTP GET request with retry logic and proper error handling.
+    Make HTTP GET request with retry logic and error handling.
     
     Args:
-        full_url (str): The full URL to request
-        base_url (str): top-level domain URL for the session adapter
+        url (str): The full URL to request
         timeout (tuple): Connection and read timeout values
         max_retries (int): Maximum number of retry attempts
         
@@ -41,11 +42,11 @@ def _request_util(full_url, base_url='https://ilga.gov/', timeout=(10, 30), max_
     )
 
     session = requests.Session()
-    session.mount(base_url, HTTPAdapter(max_retries=retry_strategy))
+    session.mount("https://", HTTPAdapter(max_retries=retry_strategy))
 
     try:
-        response = session.get(full_url, timeout=timeout)
-        response.raise_for_status()  # Raises exception for 4xx/5xx status codes
+        response = session.get(url, timeout=timeout)
+        response.raise_for_status()  
         return response
         
     except requests.exceptions.Timeout as e:
@@ -62,14 +63,23 @@ def _request_util(full_url, base_url='https://ilga.gov/', timeout=(10, 30), max_
         
     except requests.exceptions.RequestException as e:
         logging.error(f"Request failed for URL {url}: {e}")
-        raise  # Re-raise for unexpected errors
+        raise  
         
     finally:
         session.close() 
 
-def _get_pages(url_path = None, base_url = "https://ilga.gov"):
+def _get_pages(url_path: str, base_url: str = "https://ilga.gov") -> pd.DataFrame:
+    """
+    Fetches and parses links from FTP at https://ilga.gov/ftp/.
 
-    response = _request_util(full_url = f'{base_url}{url_path}')
+    Args:
+        url_path (str, optional): Path to append to the base_url.
+        base_url (str): Base URL of the site.
+
+    Returns:
+        pd.DataFrame: DataFrame with columns 'label' and 'href' for each link found.
+    """
+    response = _request_util(url = f'{base_url}{url_path}')
     soup = BeautifulSoup(response.text, 'html.parser')
     pre_tag = soup.find('pre')
     url_links = []
@@ -89,18 +99,26 @@ def _get_pages(url_path = None, base_url = "https://ilga.gov"):
 
     return(data)
 
-def _parse_filestring(s):
-    # Extract first 9 digits
+def _parse_filestring(s: str) -> Tuple[str, str, str]:
+    """
+    Parses a file string into three components:
+    - Unique statute code (first 9 digits)
+    - Statute outline level (A, F, K, HArt, etc.)
+    - Section numbers
+
+    Args:
+        s (str): The file string to parse.
+
+    Returns:
+        tuple: (first_9_digits, letters, remaining_numbers)
+    """
     first_9_digits = s[:9]
-    # Pattern for letters: A, F, K, HArt
     letters_pattern = re.compile(r'(A|F|K|HArt.|HTit.|HPt.|HDiv.|Hprec.|HCh.)')
     letters_match = letters_pattern.search(s[9:])
     letters = ''
     if letters_match:
         letters = letters_match.group(0)
-    # Find position of letters
     letters_pos = s.find(letters, 9) if letters else -1
-    # Extract remaining numbers after letters and before .html
     remaining_numbers = ''
     if letters_pos != -1:
         start_pos = letters_pos + len(letters)
@@ -109,13 +127,10 @@ def _parse_filestring(s):
 
     return first_9_digits, letters, remaining_numbers
 
-# %% 
-
-# %%
-def build_ilcs_index(base_url="https://ilga.gov", root_path="/ftp/ILCS/"):
+def build_ilcs_index(base_url:str="https://ilga.gov", root_path:str="/ftp/ILCS/") -> pd.DataFrame:
     """
-    Crawl the ILGA site hierarchy and build an index DataFrame
-    mapping chapters, acts, and sections.
+    Crawl the ILGA site hierarchy and build a DataFrame
+    indexing chapters, acts, and sections.
     
     Parameters:
         base_url (str): top-level domain URL.
@@ -125,7 +140,6 @@ def build_ilcs_index(base_url="https://ilga.gov", root_path="/ftp/ILCS/"):
         pd.DataFrame: DataFrame containing chapter, act, and section information.
     """
 
-    # Initialize empty DataFrame
     df_index = pd.DataFrame( {
         'chapter_name': pd.Series(dtype='object'),
         'chapter_url': pd.Series(dtype='object'),
@@ -135,7 +149,6 @@ def build_ilcs_index(base_url="https://ilga.gov", root_path="/ftp/ILCS/"):
         'section_url': pd.Series(dtype='object')
         })
 
-    # Get chapters
     chapters_data = _get_pages(base_url=base_url, url_path=root_path)
 
     for chapter_url in chapters_data['href']:
@@ -158,23 +171,19 @@ def build_ilcs_index(base_url="https://ilga.gov", root_path="/ftp/ILCS/"):
 
             print(f'Processing Chapter: {chapter_url}, Act: {act_url}')
 
-            # Add metadata columns
             sections_data['chapter_name'] = chapter_name
             sections_data['chapter_url'] = chapter_url
             sections_data['act_name'] = act_name
             sections_data['act_url'] = act_url
 
-            # Append to master index
             df_index = pd.concat(
                 [df_index, sections_data],
                 ignore_index=True
             )
 
-    # Parse section file name
     parsed = df_index['section_file'].apply(_parse_filestring)
     df_index[['ilcs_index_number', 'ilcs_index_type', 'ilcs_index_ext']] = pd.DataFrame(parsed.tolist(), index=df_index.index)
 
-    # Recode the ILCS levels
     mapping = {
         'A': 'Chapter (A)',
         'F': 'Act (F)',
@@ -194,110 +203,9 @@ def build_ilcs_index(base_url="https://ilga.gov", root_path="/ftp/ILCS/"):
 
     return df_index
 
-
-# %%
-
-def parse_statute_page(url_path = None, base_url = "https://ilga.gov"):
+def parse_act_page(url_path:str, base_url:str = "https://ilga.gov") -> pd.DataFrame:
     """
-    Parses an HTML page of an Illinois statute to extract information.
-
-    Args:
-        url_path (str): the URL path that follows the base_url.
-        base_url (str):  top-level domain URL.
-
-    Returns:
-        pandas.DataFrame: A DataFrame containing the extracted information
-                        for the statute, with columns for ILCS Code,
-                        Section Number, Statute Text,
-                        Source, and an Amended Statute Flag.
-    """
-
-    response = _request_util(full_url = f'{base_url}{url_path}')
-    soup = BeautifulSoup(response.text, 'html.parser')
-
-    data = {
-        'ilcs_code': None,
-        'section_number': None,
-        'statute_text': '',
-        'source': None,
-        'amended_statute': False
-    }
-
-    # Find all text within the body of the HTML
-    all_text = soup.body.get_text(separator='\n', strip=True)
-
-    # Check for amended text and set the flag
-    if "Text of Section after amendment" in all_text:
-        data['amended_statute'] = True
-        # If there's an amendment, we only care about the text after this line
-        all_text = all_text.split("Text of Section after amendment")[1]
-
-    lines = all_text.split('\n')
-    
-    # Use flags to control the parsing process
-    found_section = False
-    found_statute_text = False
-
-    # A buffer to hold the statute text
-    statute_text_lines = []
-
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-
-        # 1. Extract ILCS Code
-        if re.match(r'\(\d+\s+ILCS\s+\d+/\d+(\.\d+)?\)', line) and not data['ilcs_code']:
-            data['ilcs_code'] = line
-            continue
-
-        # 2. Extract Section Number and Title
-        if line.startswith('Sec.') and not found_section:
-            parts = line.split('.', 1)
-            if len(parts) > 1:
-                data['section_number'] = parts[1].strip()
-            else:
-                data['section_number'] = line
-            found_section = True
-            found_statute_text = True # Start capturing statute text right after
-            continue
-            
-        # 4. Extract Source
-        if line.startswith('(Source:'):
-            data['source'] = line
-            found_statute_text = False # Stop capturing statute text
-            continue
-
-        # 3. Extract Statute Text
-        if found_statute_text:
-            # Re-introduce indentation for visual structure
-            # This part assumes indentation is done with non-breaking spaces
-            original_element = soup.find(string=re.compile(re.escape(line)))
-            if original_element:
-                # We go up to the parent and get all the preceding whitespace
-                leading_whitespace = ''
-                for sibling in original_element.parent.previous_siblings:
-                    if isinstance(sibling, str):
-                        leading_whitespace = sibling + leading_whitespace
-                    else:
-                        break
-                # Clean up and count spaces for indentation
-                indent_spaces = leading_whitespace.replace('\xa0', ' ').count(' ')
-                statute_text_lines.append(' ' * indent_spaces + line)
-            else:
-                statute_text_lines.append(line)
-
-
-    data['statute_text'] = '\n'.join(statute_text_lines).strip()
-
-    # Convert dictionary to DataFrame
-    df = pd.DataFrame([data])
-
-    return df
-
-def parse_act_page(url_path = None, base_url = "https://ilga.gov"):
-    """
-    Extracts specific text elements from an HTML page using BeautifulSoup
+    Extracts Act text elements from ILGA HTML page using BeautifulSoup
     and organizes them into a pandas DataFrame.
 
     Args:
@@ -309,7 +217,7 @@ def parse_act_page(url_path = None, base_url = "https://ilga.gov"):
                         title description, cite, source, and short title.
     """
 
-    response = _request_util(full_url = f'{base_url}{url_path}')
+    response = _request_util(url = f'{base_url}{url_path}')
     soup = BeautifulSoup(response.text, 'html.parser')
     data = {}
 
@@ -318,18 +226,17 @@ def parse_act_page(url_path = None, base_url = "https://ilga.gov"):
     if div:
         full_text = div.get_text(separator='\n', strip=True)
 
-        # Extract ILCS code using regex to find text in the first parentheses
+        # Extract ILCS code
         ilcs_code_match = re.search(r'^\((.*?)\)', full_text)
         data['ilcs_code'] = ilcs_code_match.group(1) if ilcs_code_match else None
 
-        # Extract ILCS act title from the second set of parentheses
+        # Extract ILCS act title 
         act_title_match = re.search(r'\((.*?)\)\s*\((.*?)\)', full_text)
         data['ilcs_act_title'] = act_title_match.group(2) if act_title_match else None
 
-        # Extract other fields based on their preceding labels
+        # Extract other fields
         title_desc_match = re.search(r'Title:\s*(.*)', full_text, re.DOTALL)
         if title_desc_match:
-            # Clean up the extracted title description
             title_text = title_desc_match.group(1).split('Cite:')[0].strip()
             data['title_description'] = ' '.join(title_text.split())
         else:
@@ -344,29 +251,24 @@ def parse_act_page(url_path = None, base_url = "https://ilga.gov"):
         short_title_match = re.search(r'Short title:\s*(.*)', full_text)
         data['short_title'] = short_title_match.group(1).strip() if short_title_match else None
 
-    # Create a DataFrame from the extracted data
     df = pd.DataFrame([data])
     return df
 
-
-# %%
-
-def build_acts_text_table(df_urls, parse_fn, act_label="Act (F)"):
+def build_acts_text_table(df_urls:pd.DataFrame, parse_fn: Callable[[str], pd.DataFrame], act_label:str="Act (F)") -> pd.DataFrame:
     """
-    Build a table of act text by parsing all Act (F) URLs.
+    Build a table of Act text by parsing all Act (F) URLs.
 
     Parameters:
         df_urls (pd.DataFrame): Input DataFrame containing ILGA URLs.
-        parse_fn (callable): Function to parse each act page.
-        act_label (str): Label to filter acts. Defaults to "Act (F)".
+        parse_fn (callable): Function to parse each Act page.
+        act_label (str): Label to filter to Acts. Defaults to "Act (F)".
 
     Returns:
-        pd.DataFrame: Concatenated DataFrame with act text data.
+        pd.DataFrame: Concatenated DataFrame with Act text data.
     """
     # Filter for acts
     df_acts = df_urls[df_urls['ilcs_index_type_label'] == act_label]
 
-    # Initialize empty result DataFrame with defined schema
     df_acts_text = pd.DataFrame(columns=[
         'ilcs_code',
         'ilcs_act_title',
@@ -390,25 +292,110 @@ def build_acts_text_table(df_urls, parse_fn, act_label="Act (F)"):
 
     return df_acts_text
 
-# %%
-
-
-def build_statutes_text_table(df_urls, parse_fn, section_label="Section (K)"):
+def parse_statute_page(url_path:str, base_url:str="https://ilga.gov") -> pd.DataFrame:
     """
-    Build a table of statute text by parsing all Section (K) URLs.
+    Extracts Statute text elements from ILGA HTML page using BeautifulSoup
+    and organizes them into a pandas DataFrame.
+
+    Args:
+        url_path (str): the URL path that follows the base_url.
+        base_url (str): top-level domain URL.
+
+    Returns:
+        pandas.DataFrame: A DataFrame containing the extracted information
+                        for the statute, with columns for ILCS Code,
+                        Section Number, Statute Text,
+                        Source, and an Amended Statute Flag.
+    """
+
+    response = _request_util(url=f'{base_url}{url_path}')
+    soup = BeautifulSoup(response.text, 'html.parser')
+
+    data = {
+        'ilcs_code': None,
+        'section_number': None,
+        'statute_text': '',
+        'source': None,
+        'amended_statute': False
+    }
+
+    # Extract ILCS code 
+    ilcs_code_match = soup.find(string=re.compile(r'\(?\d+\s+ILCS\s+\d+/\d+[\w\-.]*\)?'))
+    if ilcs_code_match:
+        ilcs_code_clean = re.search(r'\d+\s+ILCS\s+\d+/\d+[\w\-.]*', ilcs_code_match)
+        if ilcs_code_clean:
+            data['ilcs_code'] = ilcs_code_clean.group(0)
+
+    # Get all text
+    all_text = soup.body.get_text(separator='\n', strip=True)
+
+    # Indicate amended statute
+    if "Text of Section after amendment" in all_text:
+        data['amended_statute'] = True
+        all_text = all_text.split("Text of Section after amendment", 1)[1]
+
+    lines = all_text.split('\n')
+
+    found_section = False
+    found_statute_text = False
+    statute_text_lines = []
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        # Extract section number
+        if line.startswith('Sec.') and not found_section:
+            parts = line.split('.', 1)
+            if len(parts) > 1:
+                data['section_number'] = parts[1].strip()
+            else:
+                data['section_number'] = line
+            found_section = True
+            found_statute_text = True
+            continue
+
+        # Extract source
+        if line.startswith('(Source:'):
+            data['source'] = line
+            found_statute_text = False
+            continue
+
+        # Collect statute text
+        if found_statute_text:
+            original_element = soup.find(string=re.compile(re.escape(line)))
+            if original_element:
+                leading_whitespace = ''
+                for sibling in original_element.parent.previous_siblings:
+                    if isinstance(sibling, str):
+                        leading_whitespace = sibling + leading_whitespace
+                    else:
+                        break
+                indent_spaces = leading_whitespace.replace('\xa0', ' ').count(' ')
+                statute_text_lines.append(' ' * indent_spaces + line)
+            else:
+                statute_text_lines.append(line)
+
+    data['statute_text'] = '\n'.join(statute_text_lines).strip()
+
+    return pd.DataFrame([data])
+
+def build_statutes_text_table(df_urls:str, parse_fn: Callable[[str], pd.DataFrame], section_label:str="Section (K)") -> pd.DataFrame:
+    """
+    Build a table of Statute text by parsing all Section (K) URLs.
 
     Parameters:
         df_urls (pd.DataFrame): Input DataFrame containing ILGA URLs.
-        parse_fn (callable): Function to parse each statute page.
+        parse_fn (callable): Function to parse each Statute page.
         section_label (str): Label to filter sections. Defaults to "Section (K)".
 
     Returns:
-        pd.DataFrame: Concatenated DataFrame with statute text data.
+        pd.DataFrame: Concatenated DataFrame with Statute text data.
     """
     # Filter for sections
     df_statutes = df_urls[df_urls['ilcs_index_type_label'] == section_label]
 
-    # Initialize empty result DataFrame with defined schema
     df_statutes_text = pd.DataFrame(columns=[
         'ilcs_code',
         'section_number',
@@ -446,6 +433,8 @@ df_acts_text = build_acts_text_table(
     df_urls=df_ilga_urls,
     parse_fn=parse_act_page)
 
+# %%
+# Write the Act text data
 df_acts_text.to_parquet('/mnt/c/Users/nicholasmarchio/OneDrive - Cook County Government/Desktop/projects/statute-xwalk/ilcs-act-text.parquet')
 df_acts_text.to_csv('/mnt/c/Users/nicholasmarchio/OneDrive - Cook County Government/Desktop/projects/statute-xwalk/ilcs-act-text.csv')
 
@@ -458,10 +447,20 @@ chapter_act_list = pd.DataFrame({
 chapter_act_list['ilcs_index_number'] = chapter_act_list['chapter_num'] + chapter_act_list['act_num'] + '0'
 df_ilga_urls_subset = pd.merge(left = df_ilga_urls, right = chapter_act_list, how='inner', on='ilcs_index_number')
 
+# %%
 # Build table of ILCS Statute text
 df_statutes_text = build_statutes_text_table(
     df_urls=df_ilga_urls_subset,
     parse_fn=parse_statute_page)
 
+# %%
+# Write the Statute text data
 df_statutes_text.to_parquet('/mnt/c/Users/nicholasmarchio/OneDrive - Cook County Government/Desktop/projects/statute-xwalk/ilcs-statutes-text.parquet')
 df_statutes_text.to_csv('/mnt/c/Users/nicholasmarchio/OneDrive - Cook County Government/Desktop/projects/statute-xwalk/ilcs-statutes-text.csv')
+
+# %%
+# Read all files
+df_ilga_urls = pd.read_parquet('/mnt/c/Users/nicholasmarchio/OneDrive - Cook County Government/Desktop/projects/statute-xwalk/ilcs-links.parquet')
+df_acts_text = pd.read_parquet('/mnt/c/Users/nicholasmarchio/OneDrive - Cook County Government/Desktop/projects/statute-xwalk/ilcs-act-text.parquet')
+df_statutes_text = pd.read_parquet('/mnt/c/Users/nicholasmarchio/OneDrive - Cook County Government/Desktop/projects/statute-xwalk/ilcs-statutes-text.parquet')
+
